@@ -86,49 +86,49 @@ async function loadEntryLog() {
 }
 
 // ── OCR ────────────────────────────────────────────────────
-const OCR_SYSTEM = `You extract handwritten numbers from a water quality data form photo. The photo may be rotated — use the printed text to orient yourself.
+const OCR_STEP1 = `You are reading a handwritten water quality data form. The photo may be sideways or rotated — orient yourself using the printed text before reading any values.
 
-The form title is "CHFP Softening Project Weekly Data". It has 3 tables: Monday, Wednesday, Friday.
-Top-right corner has "Week of:" and "Initials:" fields.
+The form title is "CHFP Softening Project Weekly Data". It contains 3 tables for Monday, Wednesday, and Friday.
 
-Each table layout:
-- Header row: Day name | Sample Date: __/__/____ | Sample Time: ____
-- Column headers: Analyte | North Coag | South Coag | Reaction #1 | Reaction #3 | Softened | Finished
-- Row order: pH, Alkalinity, Calcium, Hardness, Conductivity, Temperature
-- Conductivity and Temperature have X marks everywhere except the Finished column
+Each table has:
+- Columns: Analyte | North Coag | South Coag | Reaction #1 | Reaction #3 | Softened | Finished
+- Rows: pH, Alkalinity, Calcium, Hardness, Conductivity, Temperature
+- Conductivity and Temperature only have values in the Finished column (other cells show X)
 
-Expected value ranges:
-- pH: 7.00–9.99
-- Alkalinity: 20–200
-- Calcium: 20–100
-- Hardness: 50–300
-- Conductivity: 100–1000
-- Temperature: 5.0–35.0
+At the top of the form: "Week of:" and "Initials:" fields.
+Each day has "Sample Date:" and "Sample Time:" fields.
 
-CRITICAL: Carefully match each handwritten number to its correct row and column by reading the printed labels.
+TASK: List every handwritten entry. For each, state the day, row label, column label, and the number.
 
-Return ONLY valid JSON (no backticks, no explanation):
-{
-  "analyst": "2-letter initials",
-  "days": [
-    {
-      "day": "Monday",
-      "date": "M/DD/YYYY or empty",
-      "time": "HHMM or empty",
-      "values": {
-        "pH::North Coag": "", "pH::South Coag": "", "pH::Reaction #1": "", "pH::Reaction #3": "", "pH::Softened": "", "pH::Finished": "",
-        "Alkalinity::North Coag": "", "Alkalinity::South Coag": "", "Alkalinity::Reaction #1": "", "Alkalinity::Reaction #3": "", "Alkalinity::Softened": "", "Alkalinity::Finished": "",
-        "Calcium::North Coag": "", "Calcium::South Coag": "", "Calcium::Reaction #1": "", "Calcium::Reaction #3": "", "Calcium::Softened": "", "Calcium::Finished": "",
-        "Hardness::North Coag": "", "Hardness::South Coag": "", "Hardness::Reaction #1": "", "Hardness::Reaction #3": "", "Hardness::Softened": "", "Hardness::Finished": "",
-        "Conductivity::Finished": "", "Temperature::Finished": ""
-      }
-    },
-    { "day": "Wednesday", "date": "", "time": "", "values": { ...same keys... } },
-    { "day": "Friday", "date": "", "time": "", "values": { ...same keys... } }
-  ]
-}`;
+Use this exact format:
 
-// Compress image to stay under Netlify function payload limits (~1MB)
+FORM HEADER:
+Initials: [value]
+
+MONDAY:
+Sample Date: [value]
+Sample Time: [value]
+pH / North Coag: [number]
+pH / South Coag: [number]
+pH / Reaction #1: [number]
+(etc. for all filled cells)
+
+WEDNESDAY:
+(same format, or "No data" if blank)
+
+FRIDAY:
+(same format, or "No data" if blank)
+
+Only list cells that contain handwritten numbers.`;
+
+const OCR_STEP2_SYSTEM = `Convert water quality readings into JSON. Return ONLY valid JSON — no backticks, no explanation, no preamble.
+
+Use empty strings for any values not listed in the readings.
+
+Required JSON structure:
+{"analyst":"XX","days":[{"day":"Monday","date":"M/DD/YYYY","time":"HHMM","values":{"pH::North Coag":"","pH::South Coag":"","pH::Reaction #1":"","pH::Reaction #3":"","pH::Softened":"","pH::Finished":"","Alkalinity::North Coag":"","Alkalinity::South Coag":"","Alkalinity::Reaction #1":"","Alkalinity::Reaction #3":"","Alkalinity::Softened":"","Alkalinity::Finished":"","Calcium::North Coag":"","Calcium::South Coag":"","Calcium::Reaction #1":"","Calcium::Reaction #3":"","Calcium::Softened":"","Calcium::Finished":"","Hardness::North Coag":"","Hardness::South Coag":"","Hardness::Reaction #1":"","Hardness::Reaction #3":"","Hardness::Softened":"","Hardness::Finished":"","Conductivity::Finished":"","Temperature::Finished":""}},{"day":"Wednesday","date":"","time":"","values":{"pH::North Coag":"","pH::South Coag":"","pH::Reaction #1":"","pH::Reaction #3":"","pH::Softened":"","pH::Finished":"","Alkalinity::North Coag":"","Alkalinity::South Coag":"","Alkalinity::Reaction #1":"","Alkalinity::Reaction #3":"","Alkalinity::Softened":"","Alkalinity::Finished":"","Calcium::North Coag":"","Calcium::South Coag":"","Calcium::Reaction #1":"","Calcium::Reaction #3":"","Calcium::Softened":"","Calcium::Finished":"","Hardness::North Coag":"","Hardness::South Coag":"","Hardness::Reaction #1":"","Hardness::Reaction #3":"","Hardness::Softened":"","Hardness::Finished":"","Conductivity::Finished":"","Temperature::Finished":""}},{"day":"Friday","date":"","time":"","values":{"pH::North Coag":"","pH::South Coag":"","pH::Reaction #1":"","pH::Reaction #3":"","pH::Softened":"","pH::Finished":"","Alkalinity::North Coag":"","Alkalinity::South Coag":"","Alkalinity::Reaction #1":"","Alkalinity::Reaction #3":"","Alkalinity::Softened":"","Alkalinity::Finished":"","Calcium::North Coag":"","Calcium::South Coag":"","Calcium::Reaction #1":"","Calcium::Reaction #3":"","Calcium::Softened":"","Calcium::Finished":"","Hardness::North Coag":"","Hardness::South Coag":"","Hardness::Reaction #1":"","Hardness::Reaction #3":"","Hardness::Softened":"","Hardness::Finished":"","Conductivity::Finished":"","Temperature::Finished":""}}]}`;
+
+// Compress image for Netlify payload limits — NO rotation
 async function compressImage(base64, mediaType) {
   return new Promise((resolve) => {
     const img = new Image();
@@ -144,26 +144,17 @@ async function compressImage(base64, mediaType) {
       canvas.width = w;
       canvas.height = h;
       canvas.getContext("2d").drawImage(img, 0, 0, w, h);
-      resolve(canvas.toDataURL("image/jpeg", 0.8).split(",")[1]);
+      resolve(canvas.toDataURL("image/jpeg", 0.85).split(",")[1]);
     };
     img.src = `data:${mediaType};base64,${base64}`;
   });
 }
 
-async function ocrImage(base64, mediaType) {
-  const compressed = await compressImage(base64, mediaType);
+async function callOcr(body) {
   const resp = await fetch("/.netlify/functions/ocr", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 2000,
-      system: OCR_SYSTEM,
-      messages: [{ role: "user", content: [
-        { type: "image", source: { type: "base64", media_type: "image/jpeg", data: compressed } },
-        { type: "text", text: "Read all handwritten values from this form. Match each number carefully to its row and column. Return only JSON." }
-      ]}]
-    })
+    body: JSON.stringify(body),
   });
   if (!resp.ok) {
     let errMsg = `Server error (${resp.status})`;
@@ -175,7 +166,32 @@ async function ocrImage(base64, mediaType) {
     const msg = typeof data.error === "string" ? data.error : data.error.message || JSON.stringify(data.error);
     throw new Error(msg);
   }
-  const text = (data.content || []).map(b => b.text || "").join("");
+  return data;
+}
+
+async function ocrImage(base64, mediaType) {
+  const compressed = await compressImage(base64, mediaType);
+
+  // Step 1: Opus reads the form as plain text — no JSON, just careful reading
+  const step1 = await callOcr({
+    model: "claude-opus-4-20250514",
+    max_tokens: 2000,
+    system: OCR_STEP1,
+    messages: [{ role: "user", content: [
+      { type: "image", source: { type: "base64", media_type: "image/jpeg", data: compressed } },
+      { type: "text", text: "Please read every handwritten value on this form carefully." }
+    ]}],
+  });
+  const readings = (step1.content || []).map(b => b.text || "").join("");
+
+  // Step 2: Sonnet converts the plain-text readings into structured JSON
+  const step2 = await callOcr({
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 2000,
+    system: OCR_STEP2_SYSTEM,
+    messages: [{ role: "user", content: "Convert these readings to JSON:\n\n" + readings }],
+  });
+  const text = (step2.content || []).map(b => b.text || "").join("");
   return JSON.parse(text.replace(/```json|```/g, "").trim());
 }
 
@@ -299,7 +315,7 @@ function MobileUploadView() {
           <div style={{ textAlign: "center", paddingTop: 48 }}>
             <div style={{ fontSize: 48, marginBottom: 16, animation: "pulse 1.5s ease-in-out infinite" }}>🔍</div>
             <div style={{ fontSize: 17, fontWeight: 600, color: "#1E293B", marginBottom: 6 }}>Reading form…</div>
-            <div style={{ fontSize: 14, color: "#64748B" }}>5–10 seconds</div>
+            <div style={{ fontSize: 14, color: "#64748B" }}>10–20 seconds</div>
             <style>{`@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }`}</style>
           </div>
         )}
@@ -623,7 +639,7 @@ function DesktopApp() {
               <div style={{ background: "#fff", borderRadius: 12, padding: "32px 40px", textAlign: "center", boxShadow: "0 20px 60px rgba(0,0,0,0.2)" }}>
                 <div style={{ fontSize: 32, marginBottom: 12 }}>🔍</div>
                 <div style={{ fontSize: 15, fontWeight: 600, color: "#1E293B", marginBottom: 4 }}>Reading form…</div>
-                <div style={{ fontSize: 13, color: "#64748B" }}>5–10 seconds</div>
+                <div style={{ fontSize: 13, color: "#64748B" }}>10–20 seconds</div>
               </div>
             </div>
           )}
