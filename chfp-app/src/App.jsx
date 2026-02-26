@@ -13,6 +13,20 @@ for (let l = 0; l < 5; l++) { DISABLED.add(`4-${l}`); DISABLED.add(`5-${l}`); }
 
 const TEAM_PASSWORD = import.meta.env.VITE_TEAM_PASSWORD || "chfp2026";
 
+// ── Rounding Rules ─────────────────────────────────────────
+// Applied on blur: pH→2dp, Temperature→1dp, Conductivity→whole
+function roundValue(analyte, raw) {
+  if (raw === "" || raw == null) return "";
+  const num = parseFloat(raw);
+  if (isNaN(num)) return raw; // leave non-numeric as-is for user to fix
+  switch (analyte) {
+    case "pH": return num.toFixed(2);
+    case "Temperature": return num.toFixed(1);
+    case "Conductivity": return Math.round(num).toString();
+    default: return raw; // Alkalinity, Calcium, Hardness — no rounding
+  }
+}
+
 // ── Helpers ────────────────────────────────────────────────
 const fmtDate = (d) => {
   const dt = new Date(d + "T12:00:00");
@@ -42,7 +56,7 @@ const emptyData = () => {
   });
   return d;
 };
-const emptyRecord = () => ({ analyst: "", sampleTime: getEST(), values: emptyData() });
+const emptyRecord = () => ({ analyst: "", sampleTime: getEST(), values: emptyData(), locked: false });
 
 // ── Supabase Data Layer ────────────────────────────────────
 async function loadSample(sampleDate) {
@@ -52,7 +66,7 @@ async function loadSample(sampleDate) {
     .eq("sample_date", sampleDate)
     .maybeSingle();
   if (error) throw error;
-  if (data) return { analyst: data.analyst, sampleTime: data.sample_time, values: data.values };
+  if (data) return { analyst: data.analyst, sampleTime: data.sample_time, values: data.values, locked: data.locked || false };
   return null;
 }
 
@@ -64,14 +78,31 @@ async function saveSample(sampleDate, record) {
       analyst: record.analyst,
       sample_time: record.sampleTime,
       values: record.values,
+      locked: record.locked || false,
     }, { onConflict: "sample_date" });
+  if (error) throw error;
+}
+
+async function lockSample(sampleDate) {
+  const { error } = await supabase
+    .from("samples")
+    .update({ locked: true })
+    .eq("sample_date", sampleDate);
+  if (error) throw error;
+}
+
+async function unlockSample(sampleDate) {
+  const { error } = await supabase
+    .from("samples")
+    .update({ locked: false })
+    .eq("sample_date", sampleDate);
   if (error) throw error;
 }
 
 async function loadEntryLog() {
   const { data, error } = await supabase
     .from("samples")
-    .select("sample_date, analyst, updated_at, values")
+    .select("sample_date, analyst, updated_at, values, locked")
     .order("sample_date", { ascending: false })
     .limit(60);
   if (error) throw error;
@@ -80,6 +111,7 @@ async function loadEntryLog() {
     analyst: r.analyst,
     savedAt: r.updated_at,
     filledCount: Object.values(r.values || {}).filter(v => v !== "").length,
+    locked: r.locked || false,
   }));
 }
 
@@ -89,6 +121,44 @@ async function deleteSample(sampleDate) {
     .delete()
     .eq("sample_date", sampleDate);
   if (error) throw error;
+}
+
+// ── CSV Export ─────────────────────────────────────────────
+async function exportCSV() {
+  const { data, error } = await supabase
+    .from("samples")
+    .select("*")
+    .order("sample_date", { ascending: true });
+  if (error) throw error;
+  if (!data || data.length === 0) return null;
+
+  // Build header
+  const valueCols = [];
+  ANALYTES.forEach((a, ai) => {
+    LOCATIONS.forEach((l, li) => {
+      if (!DISABLED.has(`${ai}-${li}`)) valueCols.push(`${a}::${l}`);
+    });
+  });
+  const header = ["Sample Date", "Analyst", "Sample Time", "Locked", ...valueCols.map(c => c.replace("::", " - "))];
+
+  // Build rows
+  const rows = data.map(r => {
+    const vals = valueCols.map(c => (r.values || {})[c] || "");
+    return [r.sample_date, r.analyst || "", r.sample_time || "", r.locked ? "Yes" : "No", ...vals];
+  });
+
+  const csv = [header, ...rows].map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(",")).join("\n");
+  return csv;
+}
+
+function downloadCSV(csv, filename) {
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 // ── Password Gate ──────────────────────────────────────────
@@ -141,8 +211,11 @@ function DesktopApp() {
   const [entries, setEntries] = useState([]);
   const [view, setView] = useState("entry");
   const [loading, setLoading] = useState(true);
+  const [exporting, setExporting] = useState(false);
   const saveTimer = useRef(null);
   const inputRefs = useRef({});
+
+  const isLocked = record.locked;
 
   useEffect(() => {
     let cancelled = false;
@@ -163,12 +236,14 @@ function DesktopApp() {
   }, [view]);
 
   const save = useCallback(async (rec) => {
+    if (rec.locked) return; // don't autosave locked records
     setStatus("saving");
     try { await saveSample(date, rec); setStatus("saved"); }
     catch { setStatus("error"); }
   }, [date]);
 
   const handleChange = (key, value) => {
+    if (isLocked) return;
     const updated = { ...record, values: { ...record.values, [key]: value } };
     setRecord(updated);
     setStatus("idle");
@@ -176,7 +251,22 @@ function DesktopApp() {
     saveTimer.current = setTimeout(() => save(updated), 1200);
   };
 
+  // Apply rounding when user leaves a cell
+  const handleBlur = (key) => {
+    if (isLocked) return;
+    const analyte = key.split("::")[0];
+    const raw = record.values[key];
+    const rounded = roundValue(analyte, raw);
+    if (rounded !== raw) {
+      const updated = { ...record, values: { ...record.values, [key]: rounded } };
+      setRecord(updated);
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      saveTimer.current = setTimeout(() => save(updated), 600);
+    }
+  };
+
   const handleMeta = (field, value) => {
+    if (isLocked) return;
     const updated = { ...record, [field]: value };
     setRecord(updated);
     setStatus("idle");
@@ -207,6 +297,46 @@ function DesktopApp() {
     }
   };
 
+  const handleLock = async () => {
+    const filledCount = Object.values(record.values).filter(v => v !== "").length;
+    if (filledCount === 0) { alert("No data to finalize."); return; }
+    if (!window.confirm(`Finalize entry for ${fmtDate(date)}? This will lock the data from further edits.`)) return;
+
+    // Apply rounding to all values before locking
+    const rounded = { ...record.values };
+    for (const key of Object.keys(rounded)) {
+      const analyte = key.split("::")[0];
+      rounded[key] = roundValue(analyte, rounded[key]);
+    }
+    const finalRecord = { ...record, values: rounded, locked: true };
+    try {
+      await saveSample(date, finalRecord);
+      setRecord(finalRecord);
+      setStatus("saved");
+    } catch { setStatus("error"); }
+  };
+
+  const handleUnlock = async () => {
+    if (!window.confirm(`Unlock ${fmtDate(date)} for editing?`)) return;
+    try {
+      await unlockSample(date);
+      setRecord({ ...record, locked: false });
+    } catch {}
+  };
+
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      const csv = await exportCSV();
+      if (csv) {
+        downloadCSV(csv, `chfp_softening_data_${today()}.csv`);
+      } else {
+        alert("No data to export.");
+      }
+    } catch { alert("Export failed."); }
+    setExporting(false);
+  };
+
   const filledCount = Object.values(record.values).filter(v => v !== "").length;
   const totalCells = Object.keys(record.values).length;
 
@@ -232,6 +362,14 @@ function DesktopApp() {
 
       {view === "entry" ? (
         <div style={{ maxWidth: 1080, margin: "0 auto", padding: "20px 16px" }}>
+          {/* Locked banner */}
+          {isLocked && (
+            <div style={{ background: "#FEF9C3", border: "1px solid #FDE68A", borderRadius: 8, padding: "10px 16px", marginBottom: 16, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <span style={{ fontSize: 13, color: "#92400E", fontWeight: 500 }}>🔒 This entry is finalized and locked from editing.</span>
+              <button onClick={handleUnlock} style={{ fontSize: 12, color: "#92400E", background: "none", border: "1px solid #FDE68A", borderRadius: 6, padding: "4px 12px", cursor: "pointer", fontWeight: 600 }}>Unlock</button>
+            </div>
+          )}
+
           {/* Date nav + meta */}
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20, flexWrap: "wrap", gap: 12 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -244,15 +382,19 @@ function DesktopApp() {
             <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
               <label style={metaLabel}>Initials
                 <input value={record.analyst} onChange={e => handleMeta("analyst", e.target.value.toUpperCase().slice(0, 2))} placeholder="XX" maxLength={2}
-                  style={{ ...metaInput, minWidth: 60, width: 60, textAlign: "center", textTransform: "uppercase", letterSpacing: 2 }} />
+                  disabled={isLocked}
+                  style={{ ...metaInput, minWidth: 60, width: 60, textAlign: "center", textTransform: "uppercase", letterSpacing: 2, opacity: isLocked ? 0.6 : 1 }} />
               </label>
               <label style={metaLabel}>Sample Time
-                <input type="text" value={record.sampleTime} onChange={e => handleMeta("sampleTime", e.target.value)} placeholder="HH:MM" maxLength={5} style={metaInput} />
+                <input type="text" value={record.sampleTime} onChange={e => handleMeta("sampleTime", e.target.value)} placeholder="HH:MM" maxLength={5}
+                  disabled={isLocked}
+                  style={{ ...metaInput, opacity: isLocked ? 0.6 : 1 }} />
               </label>
               <div style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: 8 }}>
-                <div style={{ width: 8, height: 8, borderRadius: "50%", background: status === "saved" ? "#22C55E" : status === "saving" ? "#F59E0B" : status === "error" ? "#EF4444" : "#CBD5E1" }} />
+                <div style={{ width: 8, height: 8, borderRadius: "50%",
+                  background: isLocked ? "#F59E0B" : status === "saved" ? "#22C55E" : status === "saving" ? "#F59E0B" : status === "error" ? "#EF4444" : "#CBD5E1" }} />
                 <span style={{ fontSize: 12, color: "#94A3B8" }}>
-                  {status === "saved" ? "Saved" : status === "saving" ? "Saving…" : status === "error" ? "Error" : filledCount > 0 ? "Unsaved" : "No data"}
+                  {isLocked ? "Locked" : status === "saved" ? "Saved" : status === "saving" ? "Saving…" : status === "error" ? "Error" : filledCount > 0 ? "Unsaved" : "No data"}
                 </span>
               </div>
             </div>
@@ -260,7 +402,7 @@ function DesktopApp() {
 
           {/* Progress */}
           <div style={{ height: 3, background: "#E2E8F0", borderRadius: 2, marginBottom: 16, overflow: "hidden" }}>
-            <div style={{ height: "100%", width: `${(filledCount / totalCells) * 100}%`, background: filledCount === totalCells ? "#22C55E" : "#3B82F6", borderRadius: 2, transition: "width 0.4s ease" }} />
+            <div style={{ height: "100%", width: `${(filledCount / totalCells) * 100}%`, background: isLocked ? "#F59E0B" : filledCount === totalCells ? "#22C55E" : "#3B82F6", borderRadius: 2, transition: "width 0.4s ease" }} />
           </div>
 
           {/* Grid */}
@@ -277,15 +419,19 @@ function DesktopApp() {
                       <td style={analyteCell}><div>{a}</div><div style={{ fontSize: 10, color: "#94A3B8", fontWeight: 400 }}>{UNITS[a]}</div></td>
                       {LOCATIONS.map((l, li) => {
                         const dis = DISABLED.has(`${ai}-${li}`);
+                        const cellKey = `${a}::${l}`;
                         return (
-                          <td key={l} style={{ ...td, background: dis ? "#EDEFF2" : "#fff" }}>
+                          <td key={l} style={{ ...td, background: dis ? "#EDEFF2" : isLocked ? "#FAFAFA" : "#fff" }}>
                             {dis ? <span style={{ color: "#B0B8C4", fontSize: 16, fontWeight: 600 }}>✕</span> : (
                               <input ref={el => { inputRefs.current[`${ai}-${li}`] = el; }}
                                 type="text" inputMode="decimal"
-                                value={record.values[`${a}::${l}`] || ""}
-                                onChange={e => handleChange(`${a}::${l}`, e.target.value)}
+                                value={record.values[cellKey] || ""}
+                                onChange={e => handleChange(cellKey, e.target.value)}
+                                onBlur={() => handleBlur(cellKey)}
                                 onKeyDown={e => handleCellKeyDown(e, ai, li)}
-                                onFocus={e => e.target.select()} style={cellInput} />
+                                onFocus={e => e.target.select()}
+                                disabled={isLocked}
+                                style={{ ...cellInput, opacity: isLocked ? 0.7 : 1, cursor: isLocked ? "default" : "text" }} />
                             )}
                           </td>
                         );
@@ -298,40 +444,67 @@ function DesktopApp() {
           )}
 
           {/* Actions */}
-          <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", marginTop: 16, gap: 8 }}>
-            <button onClick={() => { if (window.confirm("Clear all values for this date?")) { setRecord(emptyRecord()); setStatus("idle"); } }}
-              style={{ ...actionBtn, color: "#94A3B8", borderColor: "#E2E8F0" }}>Clear</button>
-            <button onClick={async () => {
-              if (window.confirm(`Delete entry for ${fmtDate(date)}? This cannot be undone.`)) {
-                try { await deleteSample(date); setRecord(emptyRecord()); setStatus("idle"); } catch {}
-              }
-            }} style={{ ...actionBtn, color: "#EF4444", borderColor: "#FECACA" }}>Delete</button>
-            <button onClick={() => save(record)} style={{ padding: "8px 24px", borderRadius: 8, border: "none", cursor: "pointer", background: "#0B1D33", color: "#fff", fontSize: 13, fontWeight: 600 }}>Save</button>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 16 }}>
+            <div style={{ fontSize: 11, color: "#94A3B8" }}>
+              {!isLocked && "pH rounds to 2 dp · Temp to 1 dp · Conductivity to whole number"}
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              {!isLocked && (
+                <>
+                  <button onClick={() => { if (window.confirm("Clear all values for this date?")) { setRecord(emptyRecord()); setStatus("idle"); } }}
+                    style={{ ...actionBtn, color: "#94A3B8", borderColor: "#E2E8F0" }}>Clear</button>
+                  <button onClick={async () => {
+                    if (window.confirm(`Delete entry for ${fmtDate(date)}? This cannot be undone.`)) {
+                      try { await deleteSample(date); setRecord(emptyRecord()); setStatus("idle"); } catch {}
+                    }
+                  }} style={{ ...actionBtn, color: "#EF4444", borderColor: "#FECACA" }}>Delete</button>
+                  <button onClick={() => save(record)} style={{ ...actionBtn, background: "#fff" }}>Save</button>
+                  <button onClick={handleLock} style={{ padding: "8px 20px", borderRadius: 8, border: "none", cursor: "pointer", background: "#0B1D33", color: "#fff", fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
+                    🔒 Finalize
+                  </button>
+                </>
+              )}
+            </div>
           </div>
         </div>
       ) : (
         /* Entry Log */
         <div style={{ maxWidth: 800, margin: "0 auto", padding: "24px 16px" }}>
-          <h2 style={{ fontSize: 18, fontWeight: 600, color: "#1E293B", marginBottom: 16 }}>Entry Log</h2>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+            <h2 style={{ fontSize: 18, fontWeight: 600, color: "#1E293B", margin: 0 }}>Entry Log</h2>
+            <button onClick={handleExport} disabled={exporting}
+              style={{ padding: "8px 18px", borderRadius: 8, border: "1.5px solid #CBD5E1", background: "#fff", color: "#334155", fontSize: 13, fontWeight: 500, cursor: "pointer", display: "flex", alignItems: "center", gap: 6, opacity: exporting ? 0.6 : 1 }}>
+              📥 {exporting ? "Exporting…" : "Export CSV"}
+            </button>
+          </div>
           {entries.length === 0 ? <div style={{ textAlign: "center", padding: 40, color: "#94A3B8" }}>No entries yet</div> : (
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {entries.map(e => (
                 <div key={e.date} style={{ display: "flex", alignItems: "center", gap: 4 }}>
                   <button onClick={() => { setDate(e.date); setView("entry"); }}
-                    style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px", background: "#fff", border: "1px solid #E2E8F0", borderRadius: 8, cursor: "pointer", textAlign: "left", fontFamily: "inherit", fontSize: 13 }}
+                    style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px", background: "#fff", border: `1px solid ${e.locked ? "#FDE68A" : "#E2E8F0"}`, borderRadius: 8, cursor: "pointer", textAlign: "left", fontFamily: "inherit", fontSize: 13 }}
                     onMouseOver={ev => ev.currentTarget.style.borderColor = "#93C5FD"}
-                    onMouseOut={ev => ev.currentTarget.style.borderColor = "#E2E8F0"}>
-                    <div><div style={{ fontWeight: 600, color: "#1E293B" }}>{fmtDate(e.date)}</div><div style={{ color: "#64748B", fontSize: 12 }}>{e.analyst || "—"}</div></div>
-                    <div style={{ textAlign: "right" }}><div style={{ fontSize: 12, color: "#64748B" }}>{e.filledCount} values</div>
+                    onMouseOut={ev => ev.currentTarget.style.borderColor = e.locked ? "#FDE68A" : "#E2E8F0"}>
+                    <div>
+                      <div style={{ fontWeight: 600, color: "#1E293B" }}>
+                        {e.locked && <span style={{ marginRight: 6 }}>🔒</span>}
+                        {fmtDate(e.date)}
+                      </div>
+                      <div style={{ color: "#64748B", fontSize: 12 }}>{e.analyst || "—"}</div>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ fontSize: 12, color: "#64748B" }}>{e.filledCount} values{e.locked ? " · Finalized" : ""}</div>
                       {e.savedAt && <div style={{ fontSize: 11, color: "#94A3B8" }}>{new Date(e.savedAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</div>}
                     </div>
                   </button>
-                  <button onClick={async () => {
-                    if (window.confirm(`Delete ${fmtDate(e.date)}?`)) {
-                      try { await deleteSample(e.date); setEntries(prev => prev.filter(x => x.date !== e.date)); } catch {}
-                    }
-                  }} style={{ width: 32, height: 32, borderRadius: 6, border: "1px solid #FECACA", background: "#FFF", color: "#EF4444", cursor: "pointer", fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}
-                    title="Delete entry">✕</button>
+                  {!e.locked && (
+                    <button onClick={async () => {
+                      if (window.confirm(`Delete ${fmtDate(e.date)}?`)) {
+                        try { await deleteSample(e.date); setEntries(prev => prev.filter(x => x.date !== e.date)); } catch {}
+                      }
+                    }} style={{ width: 32, height: 32, borderRadius: 6, border: "1px solid #FECACA", background: "#FFF", color: "#EF4444", cursor: "pointer", fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}
+                      title="Delete entry">✕</button>
+                  )}
                 </div>
               ))}
             </div>

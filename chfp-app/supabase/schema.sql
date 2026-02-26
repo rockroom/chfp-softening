@@ -10,6 +10,7 @@ CREATE TABLE samples (
   analyst TEXT DEFAULT '',
   sample_time TEXT DEFAULT '',
   values JSONB NOT NULL DEFAULT '{}',
+  locked BOOLEAN NOT NULL DEFAULT false,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
