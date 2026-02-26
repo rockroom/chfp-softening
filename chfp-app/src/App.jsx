@@ -128,7 +128,30 @@ Return ONLY valid JSON (no backticks, no explanation):
   ]
 }`;
 
+// Compress image to stay under Netlify function payload limits (~1MB)
+async function compressImage(base64, mediaType) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const maxDim = 1600;
+      let w = img.width, h = img.height;
+      if (w > maxDim || h > maxDim) {
+        const scale = maxDim / Math.max(w, h);
+        w = Math.round(w * scale);
+        h = Math.round(h * scale);
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+      resolve(canvas.toDataURL("image/jpeg", 0.8).split(",")[1]);
+    };
+    img.src = `data:${mediaType};base64,${base64}`;
+  });
+}
+
 async function ocrImage(base64, mediaType) {
+  const compressed = await compressImage(base64, mediaType);
   const resp = await fetch("/.netlify/functions/ocr", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -137,13 +160,21 @@ async function ocrImage(base64, mediaType) {
       max_tokens: 2000,
       system: OCR_SYSTEM,
       messages: [{ role: "user", content: [
-        { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
+        { type: "image", source: { type: "base64", media_type: "image/jpeg", data: compressed } },
         { type: "text", text: "Read all handwritten values from this form. Match each number carefully to its row and column. Return only JSON." }
       ]}]
     })
   });
+  if (!resp.ok) {
+    let errMsg = `Server error (${resp.status})`;
+    try { const e = await resp.json(); errMsg = e.error?.message || e.error || errMsg; } catch {}
+    throw new Error(errMsg);
+  }
   const data = await resp.json();
-  if (data.error) throw new Error(data.error);
+  if (data.error) {
+    const msg = typeof data.error === "string" ? data.error : data.error.message || JSON.stringify(data.error);
+    throw new Error(msg);
+  }
   const text = (data.content || []).map(b => b.text || "").join("");
   return JSON.parse(text.replace(/```json|```/g, "").trim());
 }
