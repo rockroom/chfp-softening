@@ -86,23 +86,127 @@ async function loadEntryLog() {
 }
 
 // ── OCR ────────────────────────────────────────────────────
-const OCR_SYSTEM = `You extract handwritten water quality data from a printed form photo. The form has tables for Monday, Wednesday, and Friday.
-Each table: columns Analyte | North Coag | South Coag | Reaction #1 | Reaction #3 | Softened | Finished. Rows: pH, Alkalinity, Calcium, Hardness, Conductivity, Temperature. Conductivity and Temperature only at Finished.
-Return ONLY valid JSON, no backticks:
-{"days":[{"day":"Monday","date":"MM/DD/YYYY or empty","time":"HH:MM or empty","analyst":"name or empty","values":{"pH::North Coag":"value or empty","pH::South Coag":"","pH::Reaction #1":"","pH::Reaction #3":"","pH::Softened":"","pH::Finished":"","Alkalinity::North Coag":"","Alkalinity::South Coag":"","Alkalinity::Reaction #1":"","Alkalinity::Reaction #3":"","Alkalinity::Softened":"","Alkalinity::Finished":"","Calcium::North Coag":"","Calcium::South Coag":"","Calcium::Reaction #1":"","Calcium::Reaction #3":"","Calcium::Softened":"","Calcium::Finished":"","Hardness::North Coag":"","Hardness::South Coag":"","Hardness::Reaction #1":"","Hardness::Reaction #3":"","Hardness::Softened":"","Hardness::Finished":"","Conductivity::Finished":"","Temperature::Finished":""}}]}
-Numbers only. Empty string for illegible. Include all three days.`;
+const OCR_SYSTEM = `You are extracting handwritten water quality data from a photo of a printed form.
+
+CRITICAL: The photo may be ROTATED or SIDEWAYS. First, orient yourself by finding the title "CHFP Softening Project Weekly Data" and the column/row headers. Read the form in its correct orientation regardless of how the photo is rotated.
+
+The form is LANDSCAPE orientation and contains THREE tables stacked vertically: Monday (top), Wednesday (middle), Friday (bottom).
+
+Each table has this EXACT structure:
+- A header row with the day name, Sample Date fields, and Sample Time field
+- A column header row: Analyte | North Coag | South Coag | Reaction #1 | Reaction #3 | Softened | Finished
+- Data rows in this order: pH, Alkalinity, Calcium, Hardness, Conductivity, Temperature
+- Conductivity and Temperature rows have gray X marks in all columns EXCEPT "Finished"
+
+The top-right corner has "Week of:" and "Analyst:" fields.
+
+READING TIPS:
+- pH values are typically 7.xx to 9.xx (two decimal places)
+- Alkalinity values are typically 20-200 (whole numbers)
+- Calcium values are typically 20-100 (whole numbers)
+- Hardness values are typically 50-300 (whole numbers)
+- Conductivity values are typically 100-1000 (whole numbers)
+- Temperature values are typically 5.0-35.0 (one decimal place)
+
+Return ONLY valid JSON, no preamble, no markdown backticks:
+{
+  "analyst": "2-letter initials from top-right corner or empty string",
+  "days": [
+    {
+      "day": "Monday",
+      "date": "M/DD/YYYY from Sample Date field, or empty string",
+      "time": "HHMM or HH:MM from Sample Time field, or empty string",
+      "values": {
+        "pH::North Coag": "value or empty",
+        "pH::South Coag": "value or empty",
+        "pH::Reaction #1": "value or empty",
+        "pH::Reaction #3": "value or empty",
+        "pH::Softened": "value or empty",
+        "pH::Finished": "value or empty",
+        "Alkalinity::North Coag": "value or empty",
+        "Alkalinity::South Coag": "value or empty",
+        "Alkalinity::Reaction #1": "value or empty",
+        "Alkalinity::Reaction #3": "value or empty",
+        "Alkalinity::Softened": "value or empty",
+        "Alkalinity::Finished": "value or empty",
+        "Calcium::North Coag": "value or empty",
+        "Calcium::South Coag": "value or empty",
+        "Calcium::Reaction #1": "value or empty",
+        "Calcium::Reaction #3": "value or empty",
+        "Calcium::Softened": "value or empty",
+        "Calcium::Finished": "value or empty",
+        "Hardness::North Coag": "value or empty",
+        "Hardness::South Coag": "value or empty",
+        "Hardness::Reaction #1": "value or empty",
+        "Hardness::Reaction #3": "value or empty",
+        "Hardness::Softened": "value or empty",
+        "Hardness::Finished": "value or empty",
+        "Conductivity::Finished": "value or empty",
+        "Temperature::Finished": "value or empty"
+      }
+    },
+    { "day": "Wednesday", "date": "", "time": "", "values": { ... same keys ... } },
+    { "day": "Friday", "date": "", "time": "", "values": { ... same keys ... } }
+  ]
+}
+
+IMPORTANT: Double-check each value is in the correct row and column. Read the column header directly above each value and the row label to its left.`;
+
+// Rotate image to correct EXIF orientation and normalize
+async function normalizeImage(base64, mediaType) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      // If the image is taller than wide, it's likely a rotated landscape photo
+      const needsRotation = img.height > img.width * 1.2;
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
+
+      if (needsRotation) {
+        canvas.width = img.height;
+        canvas.height = img.width;
+        ctx.translate(canvas.width / 2, canvas.height / 2);
+        ctx.rotate(90 * Math.PI / 180);
+        ctx.drawImage(img, -img.width / 2, -img.height / 2);
+      } else {
+        canvas.width = img.width;
+        canvas.height = img.height;
+        ctx.drawImage(img, 0, 0);
+      }
+
+      // Downscale if very large to stay within API limits
+      const maxDim = 2048;
+      if (canvas.width > maxDim || canvas.height > maxDim) {
+        const scale = maxDim / Math.max(canvas.width, canvas.height);
+        const newW = Math.round(canvas.width * scale);
+        const newH = Math.round(canvas.height * scale);
+        const canvas2 = document.createElement("canvas");
+        canvas2.width = newW;
+        canvas2.height = newH;
+        canvas2.getContext("2d").drawImage(canvas, 0, 0, newW, newH);
+        resolve(canvas2.toDataURL("image/jpeg", 0.9).split(",")[1]);
+      } else {
+        resolve(canvas.toDataURL("image/jpeg", 0.9).split(",")[1]);
+      }
+    };
+    img.src = `data:${mediaType};base64,${base64}`;
+  });
+}
 
 async function ocrImage(base64, mediaType) {
+  // Normalize orientation before sending
+  const normalizedBase64 = await normalizeImage(base64, mediaType);
+
   const resp = await fetch("/.netlify/functions/ocr", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       model: "claude-sonnet-4-20250514",
-      max_tokens: 1000,
+      max_tokens: 2000,
       system: OCR_SYSTEM,
       messages: [{ role: "user", content: [
-        { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
-        { type: "text", text: "Extract all handwritten data. Return only JSON." }
+        { type: "image", source: { type: "base64", media_type: "image/jpeg", data: normalizedBase64 } },
+        { type: "text", text: "Extract all handwritten data from this water quality form. Orient yourself using the title and headers first. Return only JSON." }
       ]}]
     })
   });
@@ -176,7 +280,7 @@ function MobileUploadView() {
         r.readAsDataURL(file);
       });
       const result = await ocrImage(base64, file.type || "image/jpeg");
-      if (result?.days?.length) { setOcrResult(result.days); setOcrStatus("picking"); }
+      if (result?.days?.length) { setOcrResult(result); setOcrStatus("picking"); }
       else { setOcrError("No data found."); setOcrStatus("error"); }
     } catch (err) { setOcrError(err.message || "Failed"); setOcrStatus("error"); }
   };
@@ -189,7 +293,8 @@ function MobileUploadView() {
     }
     const newValues = { ...emptyData() };
     for (const [k, v] of Object.entries(dayData.values || {})) { if (v && k in newValues) newValues[k] = v; }
-    await saveSample(targetDate, { analyst: dayData.analyst || "", sampleTime: dayData.time || getEST(), values: newValues });
+    const analyst = dayData.analyst || ocrResult?.analyst || "";
+    await saveSample(targetDate, { analyst, sampleTime: dayData.time || getEST(), values: newValues });
     setSavedDays(prev => [...prev, { day: dayData.day, date: targetDate }]);
   };
 
@@ -244,12 +349,12 @@ function MobileUploadView() {
               style={{ padding: "10px 24px", borderRadius: 8, border: "1.5px solid #CBD5E1", background: "#fff", color: "#334155", fontSize: 14, cursor: "pointer", marginTop: 12 }}>Try Again</button>
           </div>
         )}
-        {ocrStatus === "picking" && ocrResult && (
+        {ocrStatus === "picking" && ocrResult?.days && (
           <div>
             <h3 style={{ fontSize: 17, fontWeight: 700, color: "#1E293B", marginBottom: 4 }}>Data Detected</h3>
             <p style={{ fontSize: 13, color: "#64748B", marginBottom: 16 }}>Tap each day to save.</p>
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {ocrResult.map((day, i) => {
+              {ocrResult.days.map((day, i) => {
                 const vc = Object.values(day.values || {}).filter(v => v !== "").length;
                 const saved = savedDays.some(s => s.day === day.day);
                 return (
@@ -257,7 +362,7 @@ function MobileUploadView() {
                     style={{ padding: "14px 16px", borderRadius: 10, border: saved ? "1.5px solid #22C55E" : "1.5px solid #E2E8F0", background: saved ? "#F0FDF4" : vc > 0 ? "#fff" : "#FAFAFA", cursor: vc > 0 && !saved ? "pointer" : "default", opacity: vc > 0 ? 1 : 0.5, textAlign: "left", fontFamily: "inherit", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <div>
                       <div style={{ fontWeight: 600, fontSize: 15, color: "#1E293B" }}>{saved ? "✅ " : ""}{day.day}</div>
-                      <div style={{ fontSize: 12, color: "#64748B" }}>{day.date || "No date"} · {day.analyst || "No analyst"}</div>
+                      <div style={{ fontSize: 12, color: "#64748B" }}>{day.date || "No date"} · {day.analyst || "—"}</div>
                     </div>
                     <div style={{ fontSize: 13, fontWeight: 600, color: saved ? "#22C55E" : vc > 0 ? "#3B82F6" : "#94A3B8" }}>{saved ? "Saved" : `${vc} values`}</div>
                   </button>
@@ -381,7 +486,7 @@ function DesktopApp() {
         r.readAsDataURL(file);
       });
       const result = await ocrImage(base64, file.type || "image/jpeg");
-      if (result?.days?.length) { setOcrResult(result.days); setOcrStatus("picking"); }
+      if (result?.days?.length) { setOcrResult(result); setOcrStatus("picking"); }
       else { setOcrError("No data found."); setOcrStatus("error"); }
     } catch (err) { setOcrError(err.message || "Failed"); setOcrStatus("error"); }
   };
@@ -394,7 +499,8 @@ function DesktopApp() {
     }
     const newValues = { ...emptyData() };
     for (const [k, v] of Object.entries(dayData.values || {})) { if (v && k in newValues) newValues[k] = v; }
-    const newRec = { analyst: dayData.analyst || record.analyst, sampleTime: dayData.time || record.sampleTime, values: newValues };
+    const analyst = dayData.analyst || ocrResult?.analyst || record.analyst;
+    const newRec = { analyst, sampleTime: dayData.time || record.sampleTime, values: newValues };
     setDate(targetDate); setRecord(newRec);
     await saveSample(targetDate, newRec);
     setOcrResult(null); setOcrStatus("idle"); setStatus("saved");
@@ -443,8 +549,8 @@ function DesktopApp() {
               <button onClick={refreshData} title="Refresh" style={{ ...navBtn, marginLeft: 4, fontSize: 14 }}>↻</button>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-              <label style={metaLabel}>Analyst
-                <input value={record.analyst} onChange={e => handleMeta("analyst", e.target.value)} placeholder="Name" style={metaInput} />
+              <label style={metaLabel}>Initials
+                <input value={record.analyst} onChange={e => handleMeta("analyst", e.target.value.toUpperCase().slice(0, 2))} placeholder="XX" maxLength={2} style={{ ...metaInput, minWidth: 60, width: 60, textAlign: "center", textTransform: "uppercase", letterSpacing: 2 }} />
               </label>
               <label style={metaLabel}>Sample Time
                 <input type="text" value={record.sampleTime} onChange={e => handleMeta("sampleTime", e.target.value)} placeholder="HH:MM" maxLength={5} style={metaInput} />
@@ -524,18 +630,18 @@ function DesktopApp() {
           )}
 
           {/* OCR picker */}
-          {ocrStatus === "picking" && ocrResult && (
+          {ocrStatus === "picking" && ocrResult?.days && (
             <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
               <div style={{ background: "#fff", borderRadius: 12, padding: 24, maxWidth: 480, width: "90%", boxShadow: "0 20px 60px rgba(0,0,0,0.2)" }}>
                 <h3 style={{ margin: "0 0 4px", fontSize: 16, fontWeight: 700, color: "#1E293B" }}>Form Data Detected</h3>
                 <p style={{ margin: "0 0 16px", fontSize: 13, color: "#64748B" }}>Select which day to import.</p>
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {ocrResult.map((day, i) => {
+                  {ocrResult.days.map((day, i) => {
                     const vc = Object.values(day.values || {}).filter(v => v !== "").length;
                     return (
                       <button key={i} onClick={() => applyOcrDay(day)} disabled={vc === 0}
                         style={{ padding: "12px 16px", borderRadius: 8, border: "1.5px solid #E2E8F0", background: vc > 0 ? "#F8FAFC" : "#FAFAFA", cursor: vc > 0 ? "pointer" : "default", opacity: vc > 0 ? 1 : 0.5, textAlign: "left", fontFamily: "inherit", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <div><div style={{ fontWeight: 600, fontSize: 14, color: "#1E293B" }}>{day.day}</div><div style={{ fontSize: 12, color: "#64748B" }}>{day.date || "No date"} · {day.analyst || "No analyst"}</div></div>
+                        <div><div style={{ fontWeight: 600, fontSize: 14, color: "#1E293B" }}>{day.day}</div><div style={{ fontSize: 12, color: "#64748B" }}>{day.date || "No date"} · {day.analyst || "—"}</div></div>
                         <div style={{ fontSize: 12, fontWeight: 600, color: vc > 0 ? "#3B82F6" : "#94A3B8" }}>{vc} values</div>
                       </button>
                     );
@@ -570,7 +676,7 @@ function DesktopApp() {
                   style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px", background: "#fff", border: "1px solid #E2E8F0", borderRadius: 8, cursor: "pointer", textAlign: "left", fontFamily: "inherit", fontSize: 13 }}
                   onMouseOver={ev => ev.currentTarget.style.borderColor = "#93C5FD"}
                   onMouseOut={ev => ev.currentTarget.style.borderColor = "#E2E8F0"}>
-                  <div><div style={{ fontWeight: 600, color: "#1E293B" }}>{fmtDate(e.date)}</div><div style={{ color: "#64748B", fontSize: 12 }}>{e.analyst || "No analyst"}</div></div>
+                  <div><div style={{ fontWeight: 600, color: "#1E293B" }}>{fmtDate(e.date)}</div><div style={{ color: "#64748B", fontSize: 12 }}>{e.analyst || "—"}</div></div>
                   <div style={{ textAlign: "right" }}><div style={{ fontSize: 12, color: "#64748B" }}>{e.filledCount} values</div>
                     {e.savedAt && <div style={{ fontSize: 11, color: "#94A3B8" }}>{new Date(e.savedAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</div>}
                   </div>
