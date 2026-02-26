@@ -86,117 +86,49 @@ async function loadEntryLog() {
 }
 
 // ── OCR ────────────────────────────────────────────────────
-const OCR_SYSTEM = `You are extracting handwritten water quality data from a photo of a printed form.
+const OCR_SYSTEM = `You extract handwritten numbers from a water quality data form photo. The photo may be rotated — use the printed text to orient yourself.
 
-CRITICAL: The photo may be ROTATED or SIDEWAYS. First, orient yourself by finding the title "CHFP Softening Project Weekly Data" and the column/row headers. Read the form in its correct orientation regardless of how the photo is rotated.
+The form title is "CHFP Softening Project Weekly Data". It has 3 tables: Monday, Wednesday, Friday.
+Top-right corner has "Week of:" and "Initials:" fields.
 
-The form is LANDSCAPE orientation and contains THREE tables stacked vertically: Monday (top), Wednesday (middle), Friday (bottom).
+Each table layout:
+- Header row: Day name | Sample Date: __/__/____ | Sample Time: ____
+- Column headers: Analyte | North Coag | South Coag | Reaction #1 | Reaction #3 | Softened | Finished
+- Row order: pH, Alkalinity, Calcium, Hardness, Conductivity, Temperature
+- Conductivity and Temperature have X marks everywhere except the Finished column
 
-Each table has this EXACT structure:
-- A header row with the day name, Sample Date fields, and Sample Time field
-- A column header row: Analyte | North Coag | South Coag | Reaction #1 | Reaction #3 | Softened | Finished
-- Data rows in this order: pH, Alkalinity, Calcium, Hardness, Conductivity, Temperature
-- Conductivity and Temperature rows have gray X marks in all columns EXCEPT "Finished"
+Expected value ranges:
+- pH: 7.00–9.99
+- Alkalinity: 20–200
+- Calcium: 20–100
+- Hardness: 50–300
+- Conductivity: 100–1000
+- Temperature: 5.0–35.0
 
-The top-right corner has "Week of:" and "Analyst:" fields.
+CRITICAL: Carefully match each handwritten number to its correct row and column by reading the printed labels.
 
-READING TIPS:
-- pH values are typically 7.xx to 9.xx (two decimal places)
-- Alkalinity values are typically 20-200 (whole numbers)
-- Calcium values are typically 20-100 (whole numbers)
-- Hardness values are typically 50-300 (whole numbers)
-- Conductivity values are typically 100-1000 (whole numbers)
-- Temperature values are typically 5.0-35.0 (one decimal place)
-
-Return ONLY valid JSON, no preamble, no markdown backticks:
+Return ONLY valid JSON (no backticks, no explanation):
 {
-  "analyst": "2-letter initials from top-right corner or empty string",
+  "analyst": "2-letter initials",
   "days": [
     {
       "day": "Monday",
-      "date": "M/DD/YYYY from Sample Date field, or empty string",
-      "time": "HHMM or HH:MM from Sample Time field, or empty string",
+      "date": "M/DD/YYYY or empty",
+      "time": "HHMM or empty",
       "values": {
-        "pH::North Coag": "value or empty",
-        "pH::South Coag": "value or empty",
-        "pH::Reaction #1": "value or empty",
-        "pH::Reaction #3": "value or empty",
-        "pH::Softened": "value or empty",
-        "pH::Finished": "value or empty",
-        "Alkalinity::North Coag": "value or empty",
-        "Alkalinity::South Coag": "value or empty",
-        "Alkalinity::Reaction #1": "value or empty",
-        "Alkalinity::Reaction #3": "value or empty",
-        "Alkalinity::Softened": "value or empty",
-        "Alkalinity::Finished": "value or empty",
-        "Calcium::North Coag": "value or empty",
-        "Calcium::South Coag": "value or empty",
-        "Calcium::Reaction #1": "value or empty",
-        "Calcium::Reaction #3": "value or empty",
-        "Calcium::Softened": "value or empty",
-        "Calcium::Finished": "value or empty",
-        "Hardness::North Coag": "value or empty",
-        "Hardness::South Coag": "value or empty",
-        "Hardness::Reaction #1": "value or empty",
-        "Hardness::Reaction #3": "value or empty",
-        "Hardness::Softened": "value or empty",
-        "Hardness::Finished": "value or empty",
-        "Conductivity::Finished": "value or empty",
-        "Temperature::Finished": "value or empty"
+        "pH::North Coag": "", "pH::South Coag": "", "pH::Reaction #1": "", "pH::Reaction #3": "", "pH::Softened": "", "pH::Finished": "",
+        "Alkalinity::North Coag": "", "Alkalinity::South Coag": "", "Alkalinity::Reaction #1": "", "Alkalinity::Reaction #3": "", "Alkalinity::Softened": "", "Alkalinity::Finished": "",
+        "Calcium::North Coag": "", "Calcium::South Coag": "", "Calcium::Reaction #1": "", "Calcium::Reaction #3": "", "Calcium::Softened": "", "Calcium::Finished": "",
+        "Hardness::North Coag": "", "Hardness::South Coag": "", "Hardness::Reaction #1": "", "Hardness::Reaction #3": "", "Hardness::Softened": "", "Hardness::Finished": "",
+        "Conductivity::Finished": "", "Temperature::Finished": ""
       }
     },
-    { "day": "Wednesday", "date": "", "time": "", "values": { ... same keys ... } },
-    { "day": "Friday", "date": "", "time": "", "values": { ... same keys ... } }
+    { "day": "Wednesday", "date": "", "time": "", "values": { ...same keys... } },
+    { "day": "Friday", "date": "", "time": "", "values": { ...same keys... } }
   ]
-}
-
-IMPORTANT: Double-check each value is in the correct row and column. Read the column header directly above each value and the row label to its left.`;
-
-// Rotate image to correct EXIF orientation and normalize
-async function normalizeImage(base64, mediaType) {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      // If the image is taller than wide, it's likely a rotated landscape photo
-      const needsRotation = img.height > img.width * 1.2;
-      const canvas = document.createElement("canvas");
-      const ctx = canvas.getContext("2d");
-
-      if (needsRotation) {
-        canvas.width = img.height;
-        canvas.height = img.width;
-        ctx.translate(canvas.width / 2, canvas.height / 2);
-        ctx.rotate(90 * Math.PI / 180);
-        ctx.drawImage(img, -img.width / 2, -img.height / 2);
-      } else {
-        canvas.width = img.width;
-        canvas.height = img.height;
-        ctx.drawImage(img, 0, 0);
-      }
-
-      // Downscale if very large to stay within API limits
-      const maxDim = 2048;
-      if (canvas.width > maxDim || canvas.height > maxDim) {
-        const scale = maxDim / Math.max(canvas.width, canvas.height);
-        const newW = Math.round(canvas.width * scale);
-        const newH = Math.round(canvas.height * scale);
-        const canvas2 = document.createElement("canvas");
-        canvas2.width = newW;
-        canvas2.height = newH;
-        canvas2.getContext("2d").drawImage(canvas, 0, 0, newW, newH);
-        resolve(canvas2.toDataURL("image/jpeg", 0.9).split(",")[1]);
-      } else {
-        resolve(canvas.toDataURL("image/jpeg", 0.9).split(",")[1]);
-      }
-    };
-    img.src = `data:${mediaType};base64,${base64}`;
-  });
-}
+}`;
 
 async function ocrImage(base64, mediaType) {
-  // Normalize orientation before sending
-  const normalizedBase64 = await normalizeImage(base64, mediaType);
-
   const resp = await fetch("/.netlify/functions/ocr", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -205,8 +137,8 @@ async function ocrImage(base64, mediaType) {
       max_tokens: 2000,
       system: OCR_SYSTEM,
       messages: [{ role: "user", content: [
-        { type: "image", source: { type: "base64", media_type: "image/jpeg", data: normalizedBase64 } },
-        { type: "text", text: "Extract all handwritten data from this water quality form. Orient yourself using the title and headers first. Return only JSON." }
+        { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
+        { type: "text", text: "Read all handwritten values from this form. Match each number carefully to its row and column. Return only JSON." }
       ]}]
     })
   });
@@ -314,7 +246,7 @@ function MobileUploadView() {
             <p style={{ fontSize: 14, color: "#64748B", marginBottom: 28, lineHeight: 1.5 }}>
               Take a photo of the completed weekly data sheet. Values will be read and saved automatically.
             </p>
-            <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={handleFile} style={{ display: "none" }} />
+            <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{ display: "none" }} />
             <button onClick={() => fileRef.current?.click()}
               style={{ padding: "14px 32px", borderRadius: 10, border: "none", cursor: "pointer", background: "#0B1D33", color: "#fff", fontSize: 16, fontWeight: 600, width: "100%", display: "inline-flex", alignItems: "center", gap: 10, justifyContent: "center" }}>
               <span style={{ fontSize: 20 }}>📷</span> Take Photo or Choose Image
@@ -327,7 +259,7 @@ function MobileUploadView() {
             <h2 style={{ fontSize: 18, fontWeight: 700, color: "#1E293B", marginBottom: 12 }}>Data Saved</h2>
             {savedDays.map((s, i) => <div key={i} style={{ fontSize: 14, color: "#334155", marginBottom: 4 }}>{s.day} → {fmtDate(s.date)}</div>)}
             <p style={{ fontSize: 13, color: "#64748B", marginTop: 16, marginBottom: 24 }}>Review imported values on the desktop app.</p>
-            <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={handleFile} style={{ display: "none" }} />
+            <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{ display: "none" }} />
             <button onClick={() => { setSavedDays([]); fileRef.current?.click(); }}
               style={{ padding: "12px 28px", borderRadius: 10, border: "1.5px solid #CBD5E1", background: "#fff", color: "#334155", fontSize: 14, fontWeight: 600, cursor: "pointer", width: "100%" }}>Upload Another</button>
           </div>
@@ -344,7 +276,7 @@ function MobileUploadView() {
           <div style={{ textAlign: "center", paddingTop: 40 }}>
             <div style={{ fontSize: 48, marginBottom: 12 }}>⚠️</div>
             <div style={{ fontSize: 15, fontWeight: 600, color: "#EF4444", marginBottom: 8 }}>{ocrError}</div>
-            <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={handleFile} style={{ display: "none" }} />
+            <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{ display: "none" }} />
             <button onClick={() => { setOcrStatus("idle"); fileRef.current?.click(); }}
               style={{ padding: "10px 24px", borderRadius: 8, border: "1.5px solid #CBD5E1", background: "#fff", color: "#334155", fontSize: 14, cursor: "pointer", marginTop: 12 }}>Try Again</button>
           </div>
