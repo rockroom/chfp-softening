@@ -43,7 +43,6 @@ const emptyData = () => {
   return d;
 };
 const emptyRecord = () => ({ analyst: "", sampleTime: getEST(), values: emptyData() });
-const isMobile = () => /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
 // ── Supabase Data Layer ────────────────────────────────────
 async function loadSample(sampleDate) {
@@ -58,15 +57,14 @@ async function loadSample(sampleDate) {
 }
 
 async function saveSample(sampleDate, record) {
-  const row = {
-    sample_date: sampleDate,
-    analyst: record.analyst,
-    sample_time: record.sampleTime,
-    values: record.values,
-  };
   const { error } = await supabase
     .from("samples")
-    .upsert(row, { onConflict: "sample_date" });
+    .upsert({
+      sample_date: sampleDate,
+      analyst: record.analyst,
+      sample_time: record.sampleTime,
+      values: record.values,
+    }, { onConflict: "sample_date" });
   if (error) throw error;
 }
 
@@ -85,120 +83,12 @@ async function loadEntryLog() {
   }));
 }
 
-// ── OCR ────────────────────────────────────────────────────
-const OCR_STEP1 = `You are reading a handwritten water quality data form. The photo may be sideways or rotated — orient yourself using the printed text before reading any values.
-
-The form title is "CHFP Softening Project Weekly Data". It contains 3 tables for Monday, Wednesday, and Friday.
-
-Each table has:
-- Columns: Analyte | North Coag | South Coag | Reaction #1 | Reaction #3 | Softened | Finished
-- Rows: pH, Alkalinity, Calcium, Hardness, Conductivity, Temperature
-- Conductivity and Temperature only have values in the Finished column (other cells show X)
-
-At the top of the form: "Week of:" and "Initials:" fields.
-Each day has "Sample Date:" and "Sample Time:" fields.
-
-TASK: List every handwritten entry. For each, state the day, row label, column label, and the number.
-
-Use this exact format:
-
-FORM HEADER:
-Initials: [value]
-
-MONDAY:
-Sample Date: [value]
-Sample Time: [value]
-pH / North Coag: [number]
-pH / South Coag: [number]
-pH / Reaction #1: [number]
-(etc. for all filled cells)
-
-WEDNESDAY:
-(same format, or "No data" if blank)
-
-FRIDAY:
-(same format, or "No data" if blank)
-
-Only list cells that contain handwritten numbers.`;
-
-const OCR_STEP2_SYSTEM = `Convert water quality readings into JSON. Return ONLY valid JSON — no backticks, no explanation, no preamble.
-
-Use empty strings for any values not listed in the readings.
-
-Required JSON structure:
-{"analyst":"XX","days":[{"day":"Monday","date":"M/DD/YYYY","time":"HHMM","values":{"pH::North Coag":"","pH::South Coag":"","pH::Reaction #1":"","pH::Reaction #3":"","pH::Softened":"","pH::Finished":"","Alkalinity::North Coag":"","Alkalinity::South Coag":"","Alkalinity::Reaction #1":"","Alkalinity::Reaction #3":"","Alkalinity::Softened":"","Alkalinity::Finished":"","Calcium::North Coag":"","Calcium::South Coag":"","Calcium::Reaction #1":"","Calcium::Reaction #3":"","Calcium::Softened":"","Calcium::Finished":"","Hardness::North Coag":"","Hardness::South Coag":"","Hardness::Reaction #1":"","Hardness::Reaction #3":"","Hardness::Softened":"","Hardness::Finished":"","Conductivity::Finished":"","Temperature::Finished":""}},{"day":"Wednesday","date":"","time":"","values":{"pH::North Coag":"","pH::South Coag":"","pH::Reaction #1":"","pH::Reaction #3":"","pH::Softened":"","pH::Finished":"","Alkalinity::North Coag":"","Alkalinity::South Coag":"","Alkalinity::Reaction #1":"","Alkalinity::Reaction #3":"","Alkalinity::Softened":"","Alkalinity::Finished":"","Calcium::North Coag":"","Calcium::South Coag":"","Calcium::Reaction #1":"","Calcium::Reaction #3":"","Calcium::Softened":"","Calcium::Finished":"","Hardness::North Coag":"","Hardness::South Coag":"","Hardness::Reaction #1":"","Hardness::Reaction #3":"","Hardness::Softened":"","Hardness::Finished":"","Conductivity::Finished":"","Temperature::Finished":""}},{"day":"Friday","date":"","time":"","values":{"pH::North Coag":"","pH::South Coag":"","pH::Reaction #1":"","pH::Reaction #3":"","pH::Softened":"","pH::Finished":"","Alkalinity::North Coag":"","Alkalinity::South Coag":"","Alkalinity::Reaction #1":"","Alkalinity::Reaction #3":"","Alkalinity::Softened":"","Alkalinity::Finished":"","Calcium::North Coag":"","Calcium::South Coag":"","Calcium::Reaction #1":"","Calcium::Reaction #3":"","Calcium::Softened":"","Calcium::Finished":"","Hardness::North Coag":"","Hardness::South Coag":"","Hardness::Reaction #1":"","Hardness::Reaction #3":"","Hardness::Softened":"","Hardness::Finished":"","Conductivity::Finished":"","Temperature::Finished":""}}]}`;
-
-// Compress image for Netlify payload limits — NO rotation
-async function compressImage(base64, mediaType) {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      const maxDim = 1600;
-      let w = img.width, h = img.height;
-      if (w > maxDim || h > maxDim) {
-        const scale = maxDim / Math.max(w, h);
-        w = Math.round(w * scale);
-        h = Math.round(h * scale);
-      }
-      const canvas = document.createElement("canvas");
-      canvas.width = w;
-      canvas.height = h;
-      canvas.getContext("2d").drawImage(img, 0, 0, w, h);
-      resolve(canvas.toDataURL("image/jpeg", 0.85).split(",")[1]);
-    };
-    img.src = `data:${mediaType};base64,${base64}`;
-  });
-}
-
-async function callOcr(body) {
-  const resp = await fetch("/.netlify/functions/ocr", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!resp.ok) {
-    let errMsg = `Server error (${resp.status})`;
-    try { const e = await resp.json(); errMsg = e.error?.message || e.error || errMsg; } catch {}
-    throw new Error(errMsg);
-  }
-  const data = await resp.json();
-  if (data.error) {
-    const msg = typeof data.error === "string" ? data.error : data.error.message || JSON.stringify(data.error);
-    throw new Error(msg);
-  }
-  return data;
-}
-
-async function ocrImage(base64, mediaType) {
-  const compressed = await compressImage(base64, mediaType);
-
-  // Step 1: Opus reads the form as plain text — no JSON, just careful reading
-  const step1 = await callOcr({
-    model: "claude-opus-4-20250514",
-    max_tokens: 2000,
-    system: OCR_STEP1,
-    messages: [{ role: "user", content: [
-      { type: "image", source: { type: "base64", media_type: "image/jpeg", data: compressed } },
-      { type: "text", text: "Please read every handwritten value on this form carefully." }
-    ]}],
-  });
-  const readings = (step1.content || []).map(b => b.text || "").join("");
-
-  // Step 2: Sonnet converts the plain-text readings into structured JSON
-  const step2 = await callOcr({
-    model: "claude-sonnet-4-20250514",
-    max_tokens: 2000,
-    system: OCR_STEP2_SYSTEM,
-    messages: [{ role: "user", content: "Convert these readings to JSON:\n\n" + readings }],
-  });
-  const text = (step2.content || []).map(b => b.text || "").join("");
-  return JSON.parse(text.replace(/```json|```/g, "").trim());
-}
-
-// ── QR Code ────────────────────────────────────────────────
-function QRCode({ url, size = 200 }) {
-  return <img src={`https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encodeURIComponent(url)}&margin=8`}
-    alt="QR Code" width={size} height={size} style={{ borderRadius: 8 }} />;
+async function deleteSample(sampleDate) {
+  const { error } = await supabase
+    .from("samples")
+    .delete()
+    .eq("sample_date", sampleDate);
+  if (error) throw error;
 }
 
 // ── Password Gate ──────────────────────────────────────────
@@ -226,7 +116,6 @@ function PasswordGate({ onAuth }) {
           style={{
             width: "100%", padding: "10px 14px", fontSize: 15, border: `1.5px solid ${error ? "#EF4444" : "#CBD5E1"}`,
             borderRadius: 8, fontFamily: "inherit", marginBottom: 12, outline: "none",
-            transition: "border-color 0.2s",
           }} />
         {error && <div style={{ fontSize: 12, color: "#EF4444", marginBottom: 8 }}>Incorrect password</div>}
         <button onClick={submit} style={{
@@ -238,137 +127,13 @@ function PasswordGate({ onAuth }) {
   );
 }
 
-// ── Mobile Upload View ─────────────────────────────────────
-function MobileUploadView() {
-  const [ocrStatus, setOcrStatus] = useState("idle");
-  const [ocrResult, setOcrResult] = useState(null);
-  const [ocrError, setOcrError] = useState("");
-  const [savedDays, setSavedDays] = useState([]);
-  const fileRef = useRef(null);
-
-  const handleFile = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    e.target.value = "";
-    setOcrStatus("reading"); setOcrError(""); setOcrResult(null);
-    try {
-      const base64 = await new Promise((res, rej) => {
-        const r = new FileReader();
-        r.onload = () => res(r.result.split(",")[1]);
-        r.onerror = () => rej(new Error("Read failed"));
-        r.readAsDataURL(file);
-      });
-      const result = await ocrImage(base64, file.type || "image/jpeg");
-      if (result?.days?.length) { setOcrResult(result); setOcrStatus("picking"); }
-      else { setOcrError("No data found."); setOcrStatus("error"); }
-    } catch (err) { setOcrError(err.message || "Failed"); setOcrStatus("error"); }
-  };
-
-  const saveDayData = async (dayData) => {
-    let targetDate = today();
-    if (dayData.date) {
-      const p = dayData.date.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-      if (p) targetDate = `${p[3]}-${p[1].padStart(2,"0")}-${p[2].padStart(2,"0")}`;
-    }
-    const newValues = { ...emptyData() };
-    for (const [k, v] of Object.entries(dayData.values || {})) { if (v && k in newValues) newValues[k] = v; }
-    const analyst = dayData.analyst || ocrResult?.analyst || "";
-    await saveSample(targetDate, { analyst, sampleTime: dayData.time || getEST(), values: newValues });
-    setSavedDays(prev => [...prev, { day: dayData.day, date: targetDate }]);
-  };
-
-  return (
-    <div style={{ minHeight: "100vh", background: "#F7F8FA", fontFamily: "'IBM Plex Sans', -apple-system, sans-serif" }}>
-      <div style={{ background: "#0B1D33", color: "#fff", padding: "16px 20px" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#4FC3F7" }} />
-          <span style={{ fontSize: 15, fontWeight: 600 }}>CHFP — Upload Form</span>
-        </div>
-      </div>
-      <div style={{ padding: "24px 20px", maxWidth: 480, margin: "0 auto" }}>
-        {ocrStatus === "idle" && savedDays.length === 0 && (
-          <div style={{ textAlign: "center", paddingTop: 32 }}>
-            <div style={{ fontSize: 56, marginBottom: 16 }}>📋</div>
-            <h2 style={{ fontSize: 20, fontWeight: 700, color: "#1E293B", marginBottom: 8 }}>Upload Data Sheet Photo</h2>
-            <p style={{ fontSize: 14, color: "#64748B", marginBottom: 28, lineHeight: 1.5 }}>
-              Take a photo of the completed weekly data sheet. Values will be read and saved automatically.
-            </p>
-            <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{ display: "none" }} />
-            <button onClick={() => fileRef.current?.click()}
-              style={{ padding: "14px 32px", borderRadius: 10, border: "none", cursor: "pointer", background: "#0B1D33", color: "#fff", fontSize: 16, fontWeight: 600, width: "100%", display: "inline-flex", alignItems: "center", gap: 10, justifyContent: "center" }}>
-              <span style={{ fontSize: 20 }}>📷</span> Take Photo or Choose Image
-            </button>
-          </div>
-        )}
-        {ocrStatus === "idle" && savedDays.length > 0 && (
-          <div style={{ textAlign: "center", paddingTop: 24 }}>
-            <div style={{ fontSize: 48, marginBottom: 12 }}>✅</div>
-            <h2 style={{ fontSize: 18, fontWeight: 700, color: "#1E293B", marginBottom: 12 }}>Data Saved</h2>
-            {savedDays.map((s, i) => <div key={i} style={{ fontSize: 14, color: "#334155", marginBottom: 4 }}>{s.day} → {fmtDate(s.date)}</div>)}
-            <p style={{ fontSize: 13, color: "#64748B", marginTop: 16, marginBottom: 24 }}>Review imported values on the desktop app.</p>
-            <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{ display: "none" }} />
-            <button onClick={() => { setSavedDays([]); fileRef.current?.click(); }}
-              style={{ padding: "12px 28px", borderRadius: 10, border: "1.5px solid #CBD5E1", background: "#fff", color: "#334155", fontSize: 14, fontWeight: 600, cursor: "pointer", width: "100%" }}>Upload Another</button>
-          </div>
-        )}
-        {ocrStatus === "reading" && (
-          <div style={{ textAlign: "center", paddingTop: 48 }}>
-            <div style={{ fontSize: 48, marginBottom: 16, animation: "pulse 1.5s ease-in-out infinite" }}>🔍</div>
-            <div style={{ fontSize: 17, fontWeight: 600, color: "#1E293B", marginBottom: 6 }}>Reading form…</div>
-            <div style={{ fontSize: 14, color: "#64748B" }}>10–20 seconds</div>
-            <style>{`@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }`}</style>
-          </div>
-        )}
-        {ocrStatus === "error" && (
-          <div style={{ textAlign: "center", paddingTop: 40 }}>
-            <div style={{ fontSize: 48, marginBottom: 12 }}>⚠️</div>
-            <div style={{ fontSize: 15, fontWeight: 600, color: "#EF4444", marginBottom: 8 }}>{ocrError}</div>
-            <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{ display: "none" }} />
-            <button onClick={() => { setOcrStatus("idle"); fileRef.current?.click(); }}
-              style={{ padding: "10px 24px", borderRadius: 8, border: "1.5px solid #CBD5E1", background: "#fff", color: "#334155", fontSize: 14, cursor: "pointer", marginTop: 12 }}>Try Again</button>
-          </div>
-        )}
-        {ocrStatus === "picking" && ocrResult?.days && (
-          <div>
-            <h3 style={{ fontSize: 17, fontWeight: 700, color: "#1E293B", marginBottom: 4 }}>Data Detected</h3>
-            <p style={{ fontSize: 13, color: "#64748B", marginBottom: 16 }}>Tap each day to save.</p>
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {ocrResult.days.map((day, i) => {
-                const vc = Object.values(day.values || {}).filter(v => v !== "").length;
-                const saved = savedDays.some(s => s.day === day.day);
-                return (
-                  <button key={i} onClick={() => { if (!saved && vc > 0) saveDayData(day); }} disabled={vc === 0 || saved}
-                    style={{ padding: "14px 16px", borderRadius: 10, border: saved ? "1.5px solid #22C55E" : "1.5px solid #E2E8F0", background: saved ? "#F0FDF4" : vc > 0 ? "#fff" : "#FAFAFA", cursor: vc > 0 && !saved ? "pointer" : "default", opacity: vc > 0 ? 1 : 0.5, textAlign: "left", fontFamily: "inherit", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <div>
-                      <div style={{ fontWeight: 600, fontSize: 15, color: "#1E293B" }}>{saved ? "✅ " : ""}{day.day}</div>
-                      <div style={{ fontSize: 12, color: "#64748B" }}>{day.date || "No date"} · {day.analyst || "—"}</div>
-                    </div>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: saved ? "#22C55E" : vc > 0 ? "#3B82F6" : "#94A3B8" }}>{saved ? "Saved" : `${vc} values`}</div>
-                  </button>
-                );
-              })}
-            </div>
-            {savedDays.length > 0 && (
-              <button onClick={() => { setOcrResult(null); setOcrStatus("idle"); }}
-                style={{ marginTop: 16, padding: "12px 24px", borderRadius: 10, border: "none", background: "#0B1D33", color: "#fff", fontSize: 14, fontWeight: 600, cursor: "pointer", width: "100%" }}>Done</button>
-            )}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
 // ── Main App ───────────────────────────────────────────────
 export default function App() {
   const [authed, setAuthed] = useState(() => sessionStorage.getItem("chfp_auth") === "1");
-
   if (!authed) return <PasswordGate onAuth={() => setAuthed(true)} />;
-  if (isMobile()) return <MobileUploadView />;
   return <DesktopApp />;
 }
 
-// ── Desktop App ────────────────────────────────────────────
 function DesktopApp() {
   const [date, setDate] = useState(today());
   const [record, setRecord] = useState(emptyRecord());
@@ -376,18 +141,9 @@ function DesktopApp() {
   const [entries, setEntries] = useState([]);
   const [view, setView] = useState("entry");
   const [loading, setLoading] = useState(true);
-  const [ocrStatus, setOcrStatus] = useState("idle");
-  const [ocrResult, setOcrResult] = useState(null);
-  const [ocrError, setOcrError] = useState("");
-  const [showQR, setShowQR] = useState(false);
-  const [appUrl, setAppUrl] = useState("");
   const saveTimer = useRef(null);
   const inputRefs = useRef({});
-  const fileRef = useRef(null);
 
-  useEffect(() => { setAppUrl(window.location.href); }, []);
-
-  // Load sample for current date
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -401,7 +157,6 @@ function DesktopApp() {
     return () => { cancelled = true; };
   }, [date]);
 
-  // Load entry log
   useEffect(() => {
     if (view !== "log") return;
     (async () => { try { setEntries(await loadEntryLog()); } catch { setEntries([]); } })();
@@ -452,46 +207,6 @@ function DesktopApp() {
     }
   };
 
-  const handleFileUpload = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    e.target.value = "";
-    setOcrStatus("reading"); setOcrError(""); setOcrResult(null);
-    try {
-      const base64 = await new Promise((res, rej) => {
-        const r = new FileReader();
-        r.onload = () => res(r.result.split(",")[1]);
-        r.onerror = () => rej(new Error("Read failed"));
-        r.readAsDataURL(file);
-      });
-      const result = await ocrImage(base64, file.type || "image/jpeg");
-      if (result?.days?.length) { setOcrResult(result); setOcrStatus("picking"); }
-      else { setOcrError("No data found."); setOcrStatus("error"); }
-    } catch (err) { setOcrError(err.message || "Failed"); setOcrStatus("error"); }
-  };
-
-  const applyOcrDay = async (dayData) => {
-    let targetDate = date;
-    if (dayData.date) {
-      const p = dayData.date.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-      if (p) targetDate = `${p[3]}-${p[1].padStart(2,"0")}-${p[2].padStart(2,"0")}`;
-    }
-    const newValues = { ...emptyData() };
-    for (const [k, v] of Object.entries(dayData.values || {})) { if (v && k in newValues) newValues[k] = v; }
-    const analyst = dayData.analyst || ocrResult?.analyst || record.analyst;
-    const newRec = { analyst, sampleTime: dayData.time || record.sampleTime, values: newValues };
-    setDate(targetDate); setRecord(newRec);
-    await saveSample(targetDate, newRec);
-    setOcrResult(null); setOcrStatus("idle"); setStatus("saved");
-  };
-
-  const refreshData = async () => {
-    setLoading(true);
-    try { const data = await loadSample(date); setRecord(data || emptyRecord()); }
-    catch { setRecord(emptyRecord()); }
-    setLoading(false); setStatus("idle");
-  };
-
   const filledCount = Object.values(record.values).filter(v => v !== "").length;
   const totalCells = Object.keys(record.values).length;
 
@@ -525,11 +240,11 @@ function DesktopApp() {
                 style={{ fontSize: 14, padding: "7px 12px", border: "1.5px solid #CBD5E1", borderRadius: 8, fontFamily: "inherit", color: "#1E293B", background: "#fff" }} />
               <button onClick={() => handleNav(1)} style={navBtn}>►</button>
               <span style={{ fontSize: 15, fontWeight: 600, color: "#334155", marginLeft: 6 }}>{fmtDate(date)}</span>
-              <button onClick={refreshData} title="Refresh" style={{ ...navBtn, marginLeft: 4, fontSize: 14 }}>↻</button>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
               <label style={metaLabel}>Initials
-                <input value={record.analyst} onChange={e => handleMeta("analyst", e.target.value.toUpperCase().slice(0, 2))} placeholder="XX" maxLength={2} style={{ ...metaInput, minWidth: 60, width: 60, textAlign: "center", textTransform: "uppercase", letterSpacing: 2 }} />
+                <input value={record.analyst} onChange={e => handleMeta("analyst", e.target.value.toUpperCase().slice(0, 2))} placeholder="XX" maxLength={2}
+                  style={{ ...metaInput, minWidth: 60, width: 60, textAlign: "center", textTransform: "uppercase", letterSpacing: 2 }} />
               </label>
               <label style={metaLabel}>Sample Time
                 <input type="text" value={record.sampleTime} onChange={e => handleMeta("sampleTime", e.target.value)} placeholder="HH:MM" maxLength={5} style={metaInput} />
@@ -583,66 +298,16 @@ function DesktopApp() {
           )}
 
           {/* Actions */}
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 16 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <input ref={fileRef} type="file" accept="image/*" onChange={handleFileUpload} style={{ display: "none" }} />
-              <button onClick={() => fileRef.current?.click()} disabled={ocrStatus === "reading"} style={{ ...actionBtn, opacity: ocrStatus === "reading" ? 0.6 : 1 }}>
-                <span style={{ fontSize: 16 }}>📷</span> {ocrStatus === "reading" ? "Reading…" : "Upload Photo"}
-              </button>
-              <button onClick={() => setShowQR(true)} style={actionBtn}><span style={{ fontSize: 15 }}>⊞</span> Scan QR</button>
-              {ocrStatus === "error" && <span style={{ fontSize: 12, color: "#EF4444" }}>{ocrError}</span>}
-            </div>
-            <button onClick={() => save(record)} style={{ padding: "8px 24px", borderRadius: 8, border: "none", cursor: "pointer", background: "#0B1D33", color: "#fff", fontSize: 13, fontWeight: 600 }}>Save Entry</button>
+          <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", marginTop: 16, gap: 8 }}>
+            <button onClick={() => { if (window.confirm("Clear all values for this date?")) { setRecord(emptyRecord()); setStatus("idle"); } }}
+              style={{ ...actionBtn, color: "#94A3B8", borderColor: "#E2E8F0" }}>Clear</button>
+            <button onClick={async () => {
+              if (window.confirm(`Delete entry for ${fmtDate(date)}? This cannot be undone.`)) {
+                try { await deleteSample(date); setRecord(emptyRecord()); setStatus("idle"); } catch {}
+              }
+            }} style={{ ...actionBtn, color: "#EF4444", borderColor: "#FECACA" }}>Delete</button>
+            <button onClick={() => save(record)} style={{ padding: "8px 24px", borderRadius: 8, border: "none", cursor: "pointer", background: "#0B1D33", color: "#fff", fontSize: 13, fontWeight: 600 }}>Save</button>
           </div>
-
-          {/* QR Modal */}
-          {showQR && (
-            <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }} onClick={() => setShowQR(false)}>
-              <div onClick={e => e.stopPropagation()} style={{ background: "#fff", borderRadius: 16, padding: 32, maxWidth: 380, width: "90%", textAlign: "center", boxShadow: "0 20px 60px rgba(0,0,0,0.2)" }}>
-                <h3 style={{ margin: "0 0 8px", fontSize: 17, fontWeight: 700, color: "#1E293B" }}>Mobile Upload</h3>
-                <p style={{ margin: "0 0 20px", fontSize: 13, color: "#64748B", lineHeight: 1.5 }}>Scan with your phone to upload a form photo. Data saves directly to the database.</p>
-                {appUrl && <QRCode url={appUrl} size={200} />}
-                <p style={{ margin: "16px 0 0", fontSize: 11, color: "#94A3B8" }}>Click <strong>↻</strong> to refresh after mobile upload.</p>
-                <button onClick={() => setShowQR(false)} style={{ marginTop: 16, padding: "8px 24px", borderRadius: 8, border: "1.5px solid #CBD5E1", background: "#fff", color: "#64748B", fontSize: 13, cursor: "pointer" }}>Close</button>
-              </div>
-            </div>
-          )}
-
-          {/* OCR picker */}
-          {ocrStatus === "picking" && ocrResult?.days && (
-            <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
-              <div style={{ background: "#fff", borderRadius: 12, padding: 24, maxWidth: 480, width: "90%", boxShadow: "0 20px 60px rgba(0,0,0,0.2)" }}>
-                <h3 style={{ margin: "0 0 4px", fontSize: 16, fontWeight: 700, color: "#1E293B" }}>Form Data Detected</h3>
-                <p style={{ margin: "0 0 16px", fontSize: 13, color: "#64748B" }}>Select which day to import.</p>
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {ocrResult.days.map((day, i) => {
-                    const vc = Object.values(day.values || {}).filter(v => v !== "").length;
-                    return (
-                      <button key={i} onClick={() => applyOcrDay(day)} disabled={vc === 0}
-                        style={{ padding: "12px 16px", borderRadius: 8, border: "1.5px solid #E2E8F0", background: vc > 0 ? "#F8FAFC" : "#FAFAFA", cursor: vc > 0 ? "pointer" : "default", opacity: vc > 0 ? 1 : 0.5, textAlign: "left", fontFamily: "inherit", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <div><div style={{ fontWeight: 600, fontSize: 14, color: "#1E293B" }}>{day.day}</div><div style={{ fontSize: 12, color: "#64748B" }}>{day.date || "No date"} · {day.analyst || "—"}</div></div>
-                        <div style={{ fontSize: 12, fontWeight: 600, color: vc > 0 ? "#3B82F6" : "#94A3B8" }}>{vc} values</div>
-                      </button>
-                    );
-                  })}
-                </div>
-                <div style={{ marginTop: 16, display: "flex", justifyContent: "flex-end" }}>
-                  <button onClick={() => { setOcrResult(null); setOcrStatus("idle"); }} style={{ padding: "7px 18px", borderRadius: 7, border: "1.5px solid #CBD5E1", background: "#fff", color: "#64748B", fontSize: 13, cursor: "pointer" }}>Cancel</button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Reading overlay */}
-          {ocrStatus === "reading" && (
-            <div style={{ position: "fixed", inset: 0, background: "rgba(11,29,51,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
-              <div style={{ background: "#fff", borderRadius: 12, padding: "32px 40px", textAlign: "center", boxShadow: "0 20px 60px rgba(0,0,0,0.2)" }}>
-                <div style={{ fontSize: 32, marginBottom: 12 }}>🔍</div>
-                <div style={{ fontSize: 15, fontWeight: 600, color: "#1E293B", marginBottom: 4 }}>Reading form…</div>
-                <div style={{ fontSize: 13, color: "#64748B" }}>10–20 seconds</div>
-              </div>
-            </div>
-          )}
         </div>
       ) : (
         /* Entry Log */
@@ -651,15 +316,23 @@ function DesktopApp() {
           {entries.length === 0 ? <div style={{ textAlign: "center", padding: 40, color: "#94A3B8" }}>No entries yet</div> : (
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {entries.map(e => (
-                <button key={e.date} onClick={() => { setDate(e.date); setView("entry"); }}
-                  style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px", background: "#fff", border: "1px solid #E2E8F0", borderRadius: 8, cursor: "pointer", textAlign: "left", fontFamily: "inherit", fontSize: 13 }}
-                  onMouseOver={ev => ev.currentTarget.style.borderColor = "#93C5FD"}
-                  onMouseOut={ev => ev.currentTarget.style.borderColor = "#E2E8F0"}>
-                  <div><div style={{ fontWeight: 600, color: "#1E293B" }}>{fmtDate(e.date)}</div><div style={{ color: "#64748B", fontSize: 12 }}>{e.analyst || "—"}</div></div>
-                  <div style={{ textAlign: "right" }}><div style={{ fontSize: 12, color: "#64748B" }}>{e.filledCount} values</div>
-                    {e.savedAt && <div style={{ fontSize: 11, color: "#94A3B8" }}>{new Date(e.savedAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</div>}
-                  </div>
-                </button>
+                <div key={e.date} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                  <button onClick={() => { setDate(e.date); setView("entry"); }}
+                    style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px", background: "#fff", border: "1px solid #E2E8F0", borderRadius: 8, cursor: "pointer", textAlign: "left", fontFamily: "inherit", fontSize: 13 }}
+                    onMouseOver={ev => ev.currentTarget.style.borderColor = "#93C5FD"}
+                    onMouseOut={ev => ev.currentTarget.style.borderColor = "#E2E8F0"}>
+                    <div><div style={{ fontWeight: 600, color: "#1E293B" }}>{fmtDate(e.date)}</div><div style={{ color: "#64748B", fontSize: 12 }}>{e.analyst || "—"}</div></div>
+                    <div style={{ textAlign: "right" }}><div style={{ fontSize: 12, color: "#64748B" }}>{e.filledCount} values</div>
+                      {e.savedAt && <div style={{ fontSize: 11, color: "#94A3B8" }}>{new Date(e.savedAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</div>}
+                    </div>
+                  </button>
+                  <button onClick={async () => {
+                    if (window.confirm(`Delete ${fmtDate(e.date)}?`)) {
+                      try { await deleteSample(e.date); setEntries(prev => prev.filter(x => x.date !== e.date)); } catch {}
+                    }
+                  }} style={{ width: 32, height: 32, borderRadius: 6, border: "1px solid #FECACA", background: "#FFF", color: "#EF4444", cursor: "pointer", fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}
+                    title="Delete entry">✕</button>
+                </div>
               ))}
             </div>
           )}
