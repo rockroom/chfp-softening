@@ -93,10 +93,13 @@ Return ONLY valid JSON, no backticks:
 Numbers only. Empty string for illegible. Include all three days.`;
 
 async function ocrImage(base64, mediaType) {
-  const resp = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST", headers: { "Content-Type": "application/json" },
+  const resp = await fetch("/.netlify/functions/ocr", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: "claude-sonnet-4-20250514", max_tokens: 1000, system: OCR_SYSTEM,
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1000,
+      system: OCR_SYSTEM,
       messages: [{ role: "user", content: [
         { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
         { type: "text", text: "Extract all handwritten data. Return only JSON." }
@@ -104,6 +107,7 @@ async function ocrImage(base64, mediaType) {
     })
   });
   const data = await resp.json();
+  if (data.error) throw new Error(data.error);
   const text = (data.content || []).map(b => b.text || "").join("");
   return JSON.parse(text.replace(/```json|```/g, "").trim());
 }
